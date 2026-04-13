@@ -1,0 +1,25 @@
+:root {
+  --surface-blur: rgba(15, 23, 42, 0.75);
+  --border-glass: rgba(255, 255, 255, 0.1);
+  --accent-primary: #A855F7;
+  --status-active: #10B981;
+  --status-warning: #F59E0B;
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --bg-gradient: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 350px;
+  min-height: 400px;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg-gradient);
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}

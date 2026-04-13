@@ -18,6 +18,10 @@ export default defineContentScript({
           store.toggle();
           break;
 
+        case 'PING':
+          sendResponse({ pong: true });
+          break;
+
         case 'GET_AOM': {
           const aom = aomParser.parseFlat();
           sendResponse({ aom });
@@ -25,10 +29,13 @@ export default defineContentScript({
         }
 
         case 'EXECUTE_ACTION': {
-          executeAction(message.payload);
-          sendResponse({ ok: true });
-          return false;
+          executeAction(message.payload).then((result) => {
+            sendResponse(result);
+          });
+          return true; // async response
         }
+
+
 
         case 'CHAT_STREAM_START':
           store.addMessage({
@@ -125,8 +132,10 @@ export default defineContentScript({
 });
 
 // --- DOM Action Executor ---
-function executeAction(action: { type: string; target_id?: string; value?: string }) {
-  if (!action.target_id && action.type !== 'scroll') return;
+async function executeAction(action: { type: string; target_id?: string; value?: string }): Promise<{ status: string; message: string }> {
+  if (!action.target_id && action.type !== 'scroll') {
+    return { status: 'failed', message: 'No target_id provided' };
+  }
 
   // The target_id is the AOM index number. Re-parse to find the actual element.
   const nodes = aomParser.parseNodes();
@@ -136,12 +145,11 @@ function executeAction(action: { type: string; target_id?: string; value?: strin
   if (action.type === 'scroll') {
     const amount = action.value === 'up' ? -400 : 400;
     window.scrollBy({ top: amount, behavior: 'smooth' });
-    return;
+    return { status: 'success', message: `Scrolled ${action.value}` };
   }
 
   if (!targetNode) {
-    console.warn(`[Oryonix] No element found for AOM index ${targetIndex}`);
-    return;
+    return { status: 'failed', message: `Element with AOM index ${targetIndex} not found in the current view.` };
   }
 
   // Find the actual DOM element by matching attributes
@@ -155,18 +163,43 @@ function executeAction(action: { type: string; target_id?: string; value?: strin
     if (htmlEl.offsetParent === null) continue; // skip hidden
     idx++;
     if (idx === targetIndex) {
-      if (action.type === 'click') {
-        htmlEl.click();
-        htmlEl.focus();
-      } else if (action.type === 'type' && action.value) {
-        if (htmlEl instanceof HTMLInputElement || htmlEl instanceof HTMLTextAreaElement) {
+      try {
+        if (action.type === 'click') {
+          htmlEl.click();
           htmlEl.focus();
-          htmlEl.value = action.value;
-          htmlEl.dispatchEvent(new Event('input', { bubbles: true }));
-          htmlEl.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (action.type === 'type' && action.value) {
+          if (htmlEl instanceof HTMLInputElement || htmlEl instanceof HTMLTextAreaElement) {
+            htmlEl.focus();
+            htmlEl.value = action.value;
+            
+            // Standard events for framework compatibility
+            htmlEl.dispatchEvent(new Event('input', { bubbles: true }));
+            htmlEl.dispatchEvent(new Event('change', { bubbles: true }));
+
+            // AUTO-SUBMIT: If typing in a search input, trigger Enter
+            const isSearchInput = htmlEl.type === 'search' || 
+                                 htmlEl.name?.includes('q') || 
+                                 htmlEl.placeholder?.toLowerCase().includes('search');
+            
+            if (isSearchInput) {
+              console.log('[Oryonix] Auto-submitting search...');
+              htmlEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+              htmlEl.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+              htmlEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+              
+              // Fallback: try finding the parent form
+              (htmlEl.closest('form') as HTMLFormElement)?.submit();
+            }
+          }
         }
+
+        return { status: 'success', message: `Successfully ${action.type}ed element ${targetIndex}` };
+      } catch (err: any) {
+        return { status: 'failed', message: `Action failed: ${err.message}` };
       }
-      return;
     }
   }
+
+  return { status: 'failed', message: `Element ${targetIndex} was found in AOM but could not be located in DOM.` };
 }
+

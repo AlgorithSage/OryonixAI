@@ -60,10 +60,14 @@ export class OllamaBridge {
         messages,
         stream: true,
         options: {
-          num_ctx: 4096,
-          temperature: 0.4,
+          num_ctx: 8192, // Increased per user request for complex AOMs
+          num_predict: 1024,
+          temperature: 0.2,
         },
       }),
+
+
+
     });
 
     if (!res.ok) {
@@ -106,92 +110,92 @@ export class OllamaBridge {
     objective: string,
     aomSnapshot: string,
     actionHistory: AgentAction[] = [],
-    chatHistory: ChatMessage[] = []
+    chatHistory: ChatMessage[] = [],
+    isRetry = false
   ): Promise<AgentAction> {
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: `You are the ORYONIX STRATEGIC CORE, a high-intelligence autonomous browser agent. 
-Your brain is composed of 5 specialized internal sub-agents who must collaborate to accomplish the objective.
+        content: `You are the ORYONIX STRATEGIC CORE. 
+Compose your brain of 5 specialized sub-agents: @INTEL, @TACTICIAN, @EXECUTOR, @CRITIC, @GUARD.
 
-### THE INTERNAL PENTARCHY:
-1. @INTEL (DOM Expert): Deeply analyzes the AOM tree. Identifies semantic meaning of elements (search bars, filters, hidden menus).
-2. @TACTICIAN (The Strategist): Maps the multi-step journey. If the user wants a YouTube channel, @TACTICIAN decides to go to youtube.com/search before clicking.
-3. @EXECUTOR (Technical Operator): Decides the exact CDP action (click, type, navigate) on specific target IDs.
-4. @CRITIC (The Auditor): Audits the outcome of the last action. Checks if we are on the right page or if a pop-up blocked us.
-5. @GUARD (Privacy Guardian): Performs a pre-flight safety check. BLOCKS any action that involves passwords or PII.
+### PROTOCOL:
+- Rapid reasoning. Return ONLY valid JSON.
+- @CRITIC: Always verify the success of the last action from HISTORY.
+- @TACTICIAN: Only issue "done" if the goal is FULLY achieved.
+- Fields: "thought", "action" { "type", "target_id", "value" }.
 
-### OPERATIONAL PROTOCOL:
-- You MUST think through each role before deciding the final action.
-- @TACTICIAN should favor internal site features (e.g. search bars, filters) over generic Google searches for depth.
-- If an objective requires multiple steps (like Amazon filtering), @TACTICIAN must roadmap them.
-
-### OUTPUT FORMAT:
-Return ONLY valid JSON. The "thought" field must contain the internal dialogue starting with the agent handles.
-
-{
-  "thought": "@INTEL: [analysis of DOM] \n@TACTICIAN: [multi-step logic] \n@EXECUTOR: [picked ID] \n@GUARD: [safety check] \n@CRITIC: [success validation]",
-  "action": {
-    "type": "click|type|scroll|navigate|wait|done",
-    "target_id": "the [number] element ID",
-    "value": "text or URL"
-  }
-}
-
-Rules:
-- click: Buttons/links
-- type: Fill inputs
-- navigate: Go to URL
-- wait: Page loading
-- done: Objective complete
-- DO NOT use markdown code fences. Raw JSON only.`,
+Valid actions: click, type, navigate, wait, done.`,
       },
       {
         role: 'user',
-        content: `Current Objective: ${objective}
+        content: `${isRetry ? '⚠️ YOUR PREVIOUS RESPONSE HAD A JSON SYNTAX ERROR. PLEASE FIX IT.\n' : ''}Current Objective: ${objective}
 
 Conversation Context:
 ${chatHistory.map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n')}
 
-Action History (technical steps taken):
+Action History (Plan + Outcome):
 ${actionHistory.length > 0 ? JSON.stringify(actionHistory, null, 2) : 'No actions taken yet.'}
 
 Current Interactive elements:
 ${aomSnapshot}
 
-What is the next action?`,
+Next Action (JSON ONLY):`,
       },
+
     ];
 
     const fullResponse = await this.chat(messages);
-
-    // Try to extract JSON from the response
-    let jsonStr = fullResponse.trim();
-
-    // 1. Extract content between first '{' and last '}'
-    const start = jsonStr.indexOf('{');
-    const end = jsonStr.lastIndexOf('}');
-    if (start !== -1 && end !== -1) {
-      jsonStr = jsonStr.substring(start, end + 1);
-    }
-
-    // 2. Escape literal newlines within the 'thought' field (LLMs often forget this)
-    const thoughtMatch = jsonStr.match(/"thought"\s*:\s*"([\s\S]*?)"\s*(?:,|\})/);
-    if (thoughtMatch) {
-      const originalThought = thoughtMatch[1];
-      const escapedThought = originalThought.replace(/\n/g, '\\n');
-      jsonStr = jsonStr.replace(originalThought, escapedThought);
-    }
+    const healedJSON = this.robustJSONHeal(fullResponse);
 
     try {
-      const parsed = AgentActionSchema.parse(JSON.parse(jsonStr));
+      const parsed = AgentActionSchema.parse(JSON.parse(healedJSON));
       return parsed;
     } catch (err: any) {
-      console.error('[Oryonix] JSON Parsing failed:', err);
+      console.error('[Oryonix] JSON Parsing failed even after healing:', err);
       console.log('[Oryonix] Raw Response:', fullResponse);
+      console.log('[Oryonix] Healed JSON Attempt:', healedJSON);
       throw new Error(`Agent Thinking Error: ${err.message}. Please retry.`);
     }
   }
+
+  /**
+   * Resilient JSON extraction and "healing" for LLM outputs.
+   */
+  private robustJSONHeal(raw: string): string {
+    let result = raw.trim();
+
+    // 1. Extract content between first '{' and last '}'
+    const start = result.indexOf('{');
+    const end = result.lastIndexOf('}');
+    if (start !== -1 && end !== -1) {
+      result = result.substring(start, end + 1);
+    } else {
+      return result; // Fallback to raw if no braces found
+    }
+
+    // 2. Fix literal newlines in multi-line strings
+    // LLMs often forget to escape \n inside JSON values.
+    result = result.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"/g, (match) => {
+      return match.replace(/\n/g, '\\n');
+    });
+
+    // 3. Remove trailing commas (e.g., [1, 2,] or {"a": 1,})
+    result = result.replace(/,\s*([}\]])/g, '$1');
+
+    // 4. Auto-close truncated JSON (Emergency Healing)
+    if (result.startsWith('{') && !result.endsWith('}')) {
+      const openBraces = (result.match(/{/g) || []).length;
+      const closeBraces = (result.match(/}/g) || []).length;
+      if (openBraces > closeBraces) {
+        result += '}'.repeat(openBraces - closeBraces);
+      }
+    }
+
+    return result;
+
+  }
+
 }
 
 export const ollama = new OllamaBridge();

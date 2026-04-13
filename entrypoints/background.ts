@@ -122,48 +122,70 @@ export default defineBackground(() => {
     runAgentCycle(tabId);
   }
 
-  async function runAgentCycle(tabId: number) {
+  async function runAgentCycle(tabId: number, isRetry = false) {
     if (!isAgentRunning || !currentObjective) return;
 
     try {
-      // 1. Tell UI we are thinking
-      sendToTab(tabId, { type: 'AGENT_THINKING_START' });
+      // 1. Ensure we have a stable connection (Handle navigation)
+      await ensureTabConnection(tabId);
 
-      // 2. Get AOM Snapshot
-      const aomResponse = await browser.tabs.sendMessage(tabId, { type: 'GET_AOM' });
+      // 2. Tell UI we are thinking (only if not a silent retry)
+      if (!isRetry) await safeSendMessage(tabId, { type: 'AGENT_THINKING_START' });
+
+      // 3. Get AOM Snapshot
+      const aomResponse = await safeSendMessage(tabId, { type: 'GET_AOM' });
       const aomSnapshot: string = aomResponse?.aom || '(no interactive elements found)';
 
-      // 3. Plan next action using LLM
-      const plan = await ollama.planAction(
-        currentObjective, 
-        aomSnapshot, 
-        actionHistory.slice(-20), // Only send last 20 actions to keep context lean
-        chatHistory
-      );
+      // 4. Plan next action using LLM
+      let plan;
+      try {
+        plan = await ollama.planAction(
+          currentObjective, 
+          aomSnapshot, 
+          actionHistory.slice(-5), 
+          chatHistory,
+          isRetry
+        );
+      } catch (err: any) {
+        if (!isRetry && (err.message.includes('Thinking Error') || err.message.includes('JSON'))) {
+          console.warn('[Oryonix] Detected JSON/Truncation error, attempting self-correction retry...');
+          return runAgentCycle(tabId, true);
+        }
+        throw err;
+      }
 
-      // 4. Broadcast the 'thought' to the UI
-      sendToTab(tabId, { type: 'AGENT_THOUGHT', payload: plan.thought });
+      // 5. Broadcast the 'thought' to the UI
+      await safeSendMessage(tabId, { type: 'AGENT_THOUGHT', payload: plan.thought });
 
-      // 5. Check if done
+      // 6. Check if done
       if (plan.action.type === 'done') {
         chatHistory.push({ role: 'assistant', content: plan.thought });
-        sendToTab(tabId, { type: 'CHAT_STREAM_END', payload: plan.thought });
+        await safeSendMessage(tabId, { type: 'CHAT_STREAM_END', payload: plan.thought });
         isAgentRunning = false;
         currentObjective = null;
-        sendToTab(tabId, { type: 'AGENT_THINKING_END' });
+        await safeSendMessage(tabId, { type: 'AGENT_THINKING_END' });
         return;
       }
 
-      // 6. Execute action
-      actionHistory.push(plan); // Record it
-      await browser.tabs.sendMessage(tabId, { type: 'EXECUTE_ACTION', payload: plan.action });
+      // 7. Execute action and capture result
+      const result = await safeSendMessage(tabId, { type: 'EXECUTE_ACTION', payload: plan.action });
+      actionHistory.push({ ...plan, result });
 
-      // 7. Wait 2 seconds for UI to update/load, then loop back
+      // 8. Wait and loop back
+      const waitTime = plan.action.type === 'navigate' ? 1200 : 500;
       setTimeout(() => {
         runAgentCycle(tabId);
-      }, 2000);
+      }, waitTime);
 
     } catch (err: any) {
+      console.error('[Oryonix] Agent Loop Error:', err);
+      // Don't kill the loop for transient connection errors if we can help it
+      if (err.message.includes('Could not establish connection')) {
+        console.log('[Oryonix] Connection lost during cycle, attempting recovery...');
+        setTimeout(() => runAgentCycle(tabId), 1000);
+        return;
+      }
+
       isAgentRunning = false;
       sendToTab(tabId, { type: 'AGENT_THINKING_END' });
       sendToTab(tabId, { type: 'CHAT_ERROR', payload: `Agent Loop Error: ${err.message}` });
@@ -171,6 +193,51 @@ export default defineBackground(() => {
     }
   }
 
+  // --- Resilience Helpers ---
+
+  /**
+   * Waits for the tab to finish loading and ensures the content script is injected.
+   */
+  async function ensureTabConnection(tabId: number) {
+    let tab = await browser.tabs.get(tabId);
+    
+    // 1. Wait for navigation to complete
+    let attempts = 0;
+    while (tab.status === 'loading' && attempts < 10) {
+      console.log(`[Oryonix] Tab ${tabId} is loading, waiting...`);
+      await new Promise(r => setTimeout(r, 1000));
+      tab = await browser.tabs.get(tabId);
+      attempts++;
+    }
+
+    // 2. Test if content script responds
+    try {
+      await browser.tabs.sendMessage(tabId, { type: 'PING' });
+    } catch {
+      console.log('[Oryonix] Content script missing after navigation. Re-injecting...');
+      await browser.scripting.executeScript({
+        target: { tabId },
+        files: ['content-scripts/content.js'],
+      });
+      // Give React a moment to mount
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  /**
+   * Sends a message with a retry mechanism for transient connection issues.
+   */
+  async function safeSendMessage(tabId: number, message: any, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await browser.tabs.sendMessage(tabId, message);
+      } catch (e: any) {
+        if (i === retries - 1) throw e;
+        console.warn(`[Oryonix] Send failed, retrying (${i + 1}/${retries})...`, e.message);
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+  }
 
   // --- Utility ---
   function sendToTab(tabId: number, message: any) {
@@ -179,3 +246,4 @@ export default defineBackground(() => {
     });
   }
 });
+

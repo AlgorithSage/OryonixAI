@@ -17,16 +17,10 @@ export class AOMParser {
     'tab', 'switch', 'option', 'combobox', 'searchbox', 'slider',
   ]);
 
-  private static MAX_ELEMENTS = 50;
+  private static MAX_ELEMENTS = 30; // Reduced for token efficiency
 
   /**
    * Returns a flat, numbered list of interactive elements on the page.
-   * This is what gets sent to the LLM — compact and token-efficient.
-   *
-   * Example output:
-   *   [1] button "Submit" id=submit-btn
-   *   [2] input[text] placeholder="Search..." id=search-input
-   *   [3] a "Home" href=/home
    */
   public parseFlat(root: HTMLElement = document.body): string {
     const nodes = this.collectInteractive(root);
@@ -34,17 +28,18 @@ export class AOMParser {
       .map((n) => {
         let line = `[${n.index}] ${n.tag}`;
         if (n.role) line += `[role=${n.role}]`;
-        if (n.text) line += ` "${n.text}"`;
-        if (n.id) line += ` id=${n.id}`;
+        if (n.text) line += ` "${n.text.slice(0, 30)}"`; // Tight truncation
+        if (n.id && n.id.length < 20) line += ` id=${n.id}`; // Skip long IDs
         if (n.attributes) {
           for (const [k, v] of Object.entries(n.attributes)) {
-            line += ` ${k}=${v}`;
+            line += ` ${k}=${v.slice(0, 40)}`; // Tighten attribute values
           }
         }
         return line;
       })
       .join('\n');
   }
+
 
   /**
    * Returns the structured array of interactive AOM nodes.

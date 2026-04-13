@@ -64,6 +64,15 @@ export default defineBackground(() => {
         isAgentRunning = false;
         break;
       }
+
+      case 'RETRY_AGENT': {
+        if (currentObjective && !isAgentRunning) {
+          console.log('[Oryonix] User triggered Retry for objective:', currentObjective);
+          isAgentRunning = true;
+          if (tabId) runAgentCycle(tabId);
+        }
+        break;
+      }
     }
   });
 

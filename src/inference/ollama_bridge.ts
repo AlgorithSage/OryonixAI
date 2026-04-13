@@ -3,12 +3,15 @@ import { z } from 'zod';
 // --- Zod Schemas ---
 
 export const AgentActionSchema = z.object({
-  thought: z.string().describe('Reasoning for the current step'),
+  evaluation: z.preprocess((val) => String(val ?? ''), z.string()).optional().default(''),
+  memory: z.preprocess((val) => String(val ?? ''), z.string()).optional().default(''),
+  next_goal: z.preprocess((val) => String(val ?? ''), z.string()).optional().default(''),
+  thought: z.preprocess((val) => String(val ?? ''), z.string()).optional().default(''),
   action: z.object({
     type: z.enum(['click', 'type', 'scroll', 'navigate', 'wait', 'done']),
-    target_id: z.string().nullish().describe('Element ID from the AOM snapshot'),
-    value: z.string().nullish().describe('Value to type or URL to navigate to'),
-  }),
+    target_id: z.union([z.string(), z.number()]).nullish().transform(val => val?.toString()).describe('Element ID from the AOM snapshot'),
+    value: z.string().preprocess((val) => val ? String(val) : null, z.string().nullish()).describe('Value to type or URL to navigate to'),
+  }).catch({ type: 'wait' } as any), // Emergency fallback to 'wait' if action is corrupted
 });
 
 export type AgentAction = z.infer<typeof AgentActionSchema>;
@@ -60,13 +63,11 @@ export class OllamaBridge {
         messages,
         stream: true,
         options: {
-          num_ctx: 8192, // Increased per user request for complex AOMs
+          num_ctx: 32768, // Expanded for massive AOM trees and long history
           num_predict: 1024,
           temperature: 0.2,
         },
       }),
-
-
 
     });
 
@@ -116,33 +117,40 @@ export class OllamaBridge {
     const messages: ChatMessage[] = [
       {
         role: 'system',
-        content: `You are the ORYONIX STRATEGIC CORE. 
-Compose your brain of 5 specialized sub-agents: @INTEL, @TACTICIAN, @EXECUTOR, @CRITIC, @GUARD.
+        content: `You are the ORYONIX STRATEGIC CORE. Your objective is: achievement through precision and brevity.
 
-### PROTOCOL:
-- Rapid reasoning. Return ONLY valid JSON.
-- @CRITIC: Always verify the success of the last action from HISTORY.
-- @TACTICIAN: Only issue "done" if the goal is FULLY achieved.
-- Fields: "thought", "action" { "type", "target_id", "value" }.
+<perception>
+- You act on a DEHYDRATED DOM TREE. 
+- INDENTATION = Nesting (sidebar/modal/footer context).
+- [idx]<tag> = INTERACTIVE element.
+- <tag> = SEMANTIC LANDMARK (landmark context).
+</perception>
 
-Valid actions: click, type, navigate, wait, done.`,
+<rules>
+1. OBSERVE: Look at the last action in HISTORY. Did it work? (State in 'evaluation').
+2. PLAN: What is the immediate SUB-GOAL? (State in 'next_goal').
+3. EXECUTE: Return ONE valid JSON action.
+4. BE CONCISE: Use exactly ONE sentence per thought field. NO yapping.
+</rules>
+
+<actions>
+- click, type, navigate, wait, scroll (value: up/down), done.
+</actions>
+
+Return ONLY valid JSON.`,
       },
       {
         role: 'user',
-        content: `${isRetry ? '⚠️ YOUR PREVIOUS RESPONSE HAD A JSON SYNTAX ERROR. PLEASE FIX IT.\n' : ''}Current Objective: ${objective}
+        content: `${isRetry ? '⚠️ PREVIOUS JSON ERROR DETECTED. FIX SYNTAX.\n' : ''}Objective: ${objective}
 
-Conversation Context:
-${chatHistory.map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n')}
+History:
+${actionHistory.length > 0 ? JSON.stringify(actionHistory.slice(-3), null, 2) : 'Start of session.'}
 
-Action History (Plan + Outcome):
-${actionHistory.length > 0 ? JSON.stringify(actionHistory, null, 2) : 'No actions taken yet.'}
-
-Current Interactive elements:
+AOM Snapshot:
 ${aomSnapshot}
 
-Next Action (JSON ONLY):`,
+Output (JSON ONLY):`,
       },
-
     ];
 
     const fullResponse = await this.chat(messages);

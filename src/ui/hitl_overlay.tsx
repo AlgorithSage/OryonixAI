@@ -19,12 +19,16 @@ interface PendingAction {
 interface PanelState {
   visible: boolean;
   messages: ChatMsg[];
-  ollamaOnline: boolean;
   agentThoughts: string[];
   isThinking: boolean;
+  ollamaOnline: boolean;
+  panelWidth: number;
+  isResizing: boolean;
   toggle: () => void;
   show: () => void;
   hide: () => void;
+  setPanelWidth: (w: number) => void;
+  setResizing: (resizing: boolean) => void;
   addMessage: (msg: ChatMsg) => void;
   updateLastAssistant: (content: string) => void;
   finalizeLastAssistant: (content: string) => void;
@@ -40,6 +44,8 @@ export const usePanelStore = create<PanelState>((set) => ({
   agentThoughts: [],
   isThinking: false,
   ollamaOnline: false,
+  panelWidth: 400,
+  isResizing: false,
 
   toggle: () => set((s) => {
     const next = !s.visible;
@@ -54,7 +60,12 @@ export const usePanelStore = create<PanelState>((set) => ({
     if (typeof browser !== 'undefined' && browser.storage) browser.storage.local.set({ isPanelOpen: false });
     return { visible: false };
   }),
-
+  setPanelWidth: (w) => set((s) => {
+    const clamped = Math.min(Math.max(w, 250), window.innerWidth * 0.6);
+    if (typeof browser !== 'undefined' && browser.storage) browser.storage.local.set({ panelWidth: clamped });
+    return { panelWidth: clamped };
+  }),
+  setResizing: (resizing) => set({ isResizing: resizing }),
   addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
 
   updateLastAssistant: (content) =>
@@ -86,7 +97,53 @@ export const usePanelStore = create<PanelState>((set) => ({
   setThinking: (thinking) => set((s) => ({ isThinking: thinking, agentThoughts: thinking ? [] : s.agentThoughts })),
 }));
 
-// --- Component ---
+// --- Sub-Components ---
+
+const ResizeHandle: React.FC = () => {
+  const { setPanelWidth, setResizing } = usePanelStore();
+  
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizing(true);
+    
+    const startX = e.clientX;
+    const startWidth = usePanelStore.getState().panelWidth;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const delta = startX - e.clientX;
+      setPanelWidth(startWidth + delta);
+    };
+
+    const onMouseUp = () => {
+      setResizing(false);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      style={{
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        bottom: 0,
+        width: '4px',
+        cursor: 'ew-resize',
+        zIndex: 100,
+        transition: 'background-color 0.2s',
+      }}
+      onMouseOver={(e) => (e.currentTarget.style.backgroundColor = 'rgba(124, 58, 237, 0.5)')}
+      onMouseOut={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+    />
+  );
+};
+
+// --- Main Component ---
 
 export const SidePanel: React.FC = () => {
   const {
@@ -95,12 +152,16 @@ export const SidePanel: React.FC = () => {
     ollamaOnline,
     agentThoughts,
     isThinking,
+    panelWidth,
+    isResizing,
     toggle,
     addMessage,
     setOllamaOnline,
+    setPanelWidth,
     clearMessages,
     hide,
   } = usePanelStore();
+
 
   const [input, setInput] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -113,12 +174,16 @@ export const SidePanel: React.FC = () => {
     }
   }, [messages, agentThoughts, isThinking]);
 
-  // Ping Ollama on mount
+  // Ping Ollama and Restore State on mount
   useEffect(() => {
     if (typeof browser !== 'undefined' && browser.runtime) {
       browser.runtime.sendMessage({ type: 'PING_OLLAMA' }).then((res: any) => {
         setOllamaOnline(res?.online ?? false);
       }).catch(() => setOllamaOnline(false));
+
+      browser.storage.local.get('panelWidth').then((res) => {
+        if (res.panelWidth) setPanelWidth(res.panelWidth);
+      });
     }
   }, [visible]);
 
@@ -151,8 +216,29 @@ export const SidePanel: React.FC = () => {
           height: '100vh',
           zIndex: 2147483640, // Just below side panel
           pointerEvents: 'none',
-          boxShadow: 'inset 0 0 60px rgba(251, 191, 36, 0.4)',
+          boxShadow: `inset 0 0 60px rgba(251, 191, 36, 0.4)`,
           animation: 'pulseGlow 2s infinite ease-in-out',
+        }}
+      />
+    );
+  };
+
+  // --- Resizing Overlays ---
+  const ResizingOverlay = () => {
+    if (!isResizing) return null;
+    return (
+      <div 
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          width: '100vw',
+          height: '100vh',
+          zIndex: 2147483646, // Just below panel but above page
+          cursor: 'ew-resize',
+          backgroundColor: 'transparent',
         }}
       />
     );
@@ -202,7 +288,7 @@ export const SidePanel: React.FC = () => {
       position: 'fixed' as const,
       top: 0,
       right: 0,
-      width: '380px',
+      width: `${panelWidth}px`,
       height: '100vh',
       backgroundColor: '#1a1a2e',
       borderLeft: '1px solid rgba(255,255,255,0.08)',
@@ -213,6 +299,7 @@ export const SidePanel: React.FC = () => {
       zIndex: 2147483647,
       boxShadow: '-4px 0 24px rgba(0,0,0,0.4)',
       boxSizing: 'border-box' as const,
+      transition: isResizing ? 'none' : 'width 0.2s ease',
     },
     header: {
       display: 'flex',
@@ -332,9 +419,19 @@ export const SidePanel: React.FC = () => {
     }),
   };
 
+  const lastMsg = messages[messages.length - 1];
+  const isLastError = lastMsg?.role === 'system' && lastMsg?.content.includes('❌');
+
+  const handleRetry = () => {
+    if (typeof browser !== 'undefined') {
+      browser.runtime.sendMessage({ type: 'RETRY_AGENT' });
+    }
+  };
+
   return (
     <>
       <ActiveGlow />
+      <ResizingOverlay />
       <style>
         {`
           @keyframes pulseGlow {
@@ -345,6 +442,8 @@ export const SidePanel: React.FC = () => {
         `}
       </style>
       <div style={S.panel}>
+        <ResizeHandle />
+
       {/* Header */}
       <div style={S.header}>
         <h3 style={S.headerTitle}>
@@ -426,6 +525,39 @@ export const SidePanel: React.FC = () => {
                 </div>
               )}
             </div>
+          )}
+
+          {/* Retry Button UI */}
+          {isLastError && !isThinking && (
+            <button 
+              onClick={handleRetry}
+              style={{
+                width: '100%',
+                padding: '12px',
+                marginTop: '12px',
+                borderRadius: '10px',
+                background: 'linear-gradient(135deg, #7c3aed 0%, #a855f7 100%)',
+                color: 'white',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: 700,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 12px rgba(124, 58, 237, 0.4)',
+                marginBottom: '16px',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                transition: 'transform 0.1s ease',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.02)')}
+              onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
+            >
+              <span style={{ fontSize: '18px' }}>⟳</span>
+              Retry Agent Task
+            </button>
           )}
 
           <div ref={messagesEndRef} />
